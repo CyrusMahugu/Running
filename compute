@@ -1,0 +1,114 @@
+#pragma kernel CSMain
+
+// Input CFD scalar field
+StructuredBuffer<float> scalarField;
+
+// Output texture
+RWTexture2D<float4> Result;
+
+// Variables
+int3 gridSize;
+float minValue;
+float maxValue;
+int sliceAxis;
+int sliceIndex;
+
+// Convert 3D index to 1D buffer index
+int Index(int x, int y, int z)
+{
+    return x + gridSize.x * (y + gridSize.y * z);
+}
+
+// Colour map
+float4 MapValueToColour(float t, float alpha)
+{
+    float4 blue = float4(0, 0, 1, alpha);
+    float4 cyan = float4(0, 1, 1, alpha);
+    float4 green = float4(0, 1, 0, alpha);
+    float4 yellow = float4(1, 1, 0, alpha);
+    float4 red = float4(1, 0, 0, alpha);
+
+    if (t < 0.025)
+    {
+        return lerp( blue, cyan, t / 0.25);
+    }
+    else if (t < 0.05)
+    {
+        return lerp(cyan, green, (t - 0.25) / 0.25);
+    }
+    else if (t < 0.075)
+    {
+        return lerp( green, yellow, (t - 0.50) / 0.25);
+    }
+    else
+    {
+        return lerp(yellow, red, (t - 0.75) / 0.25);
+    }
+}
+
+// Threadgroup size
+[numthreads(8, 8, 1)]
+
+// Main kernel
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint u = id.x;
+    uint v = id.y;
+
+    int x;
+    int y;
+    int z;
+
+    // Y plane
+    if (sliceAxis == 1)
+    {
+        if (u >= gridSize.x ||
+            v >= gridSize.z)
+            return;
+
+        x = u;
+        y = sliceIndex;
+        z = v;
+    }
+
+    // X plane
+    else if (sliceAxis == 0)
+    {
+        if (u >= gridSize.z ||
+            v >= gridSize.y)
+            return;
+
+        x = sliceIndex;
+        y = v;
+        z = u;
+    }
+
+    // Z plane
+    else
+    {
+        if (u >= gridSize.x ||
+            v >= gridSize.y)
+            return;
+
+        x = u;
+        y = v;
+        z = sliceIndex;
+    }
+
+    // Sample CFD data
+    int idx = Index(x, y, z);
+
+    float value = scalarField[idx];
+
+    // Normalize scalar value
+    float t = saturate((value - minValue) / (maxValue - minValue));
+
+    // Transparency
+    float alpha =lerp(0.4, 0.9, t);
+
+    // Apply scientific colour map
+    float4 colour = MapValueToColour(t,alpha);
+
+    // Write pixel to render texture
+    Result[int2(u, v)] = colour;
+}
