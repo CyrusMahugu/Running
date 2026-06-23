@@ -1,0 +1,59 @@
+using UnityEngine;
+
+public class VelocitySampler
+{
+    // CFD Data, grid size and world position
+    Vector3[,,] field;
+    Vector3Int size;
+    Vector3 minBound;
+    Vector3 maxBound;
+
+    public VelocitySampler(
+        Vector3[,,] velocities,
+        Vector3Int gridSize,
+        Vector3 domainMin,
+        Vector3 domainMax)
+    {
+        field = velocities;
+        size = gridSize;
+        minBound = domainMin;
+        maxBound = domainMax;
+    }
+
+    // Convert percentage to grid index
+    public Vector3 Sample(Vector3 worldPos)
+    {
+        float tx = Mathf.InverseLerp(
+            minBound.x,
+            maxBound.x,
+            worldPos.x);
+
+        float ty = Mathf.InverseLerp(
+            minBound.y,
+            maxBound.y,
+            worldPos.y);
+
+        float tz = Mathf.InverseLerp(
+            minBound.z,
+            maxBound.z,
+            worldPos.z);
+
+        int x = Mathf.Clamp(
+            Mathf.RoundToInt(tx * (size.x - 1)),
+            0,
+            size.x - 1);
+
+        int y = Mathf.Clamp(
+            Mathf.RoundToInt(ty * (size.y - 1)),
+            0,
+            size.y - 1);
+
+        int z = Mathf.Clamp(
+            Mathf.RoundToInt(tz * (size.z - 1)),
+            0,
+            size.z - 1);
+
+        
+            return field[x, y, z];
+    }
+}
