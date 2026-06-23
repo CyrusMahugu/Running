@@ -1,0 +1,272 @@
+using UnityEngine;
+
+public class GPUSliceRenderer : MonoBehaviour
+{
+    // Compute shader used for contour slice generation
+    public ComputeShader sliceShader;
+
+    // Slice plane orientation
+    public enum SliceAxis
+    {
+        X = 0,
+        Y = 1,
+        Z = 2
+    }
+
+    // Slice configuration
+    public SliceAxis sliceAxis = SliceAxis.Y;
+
+    // Slice position within selected axis
+    public int sliceIndex = 10;
+
+    // CFD scalar field data
+    public Vector3Int gridSize;
+    public float[,,] scalarField;
+
+    // CFD domain boundaries
+    public Vector3 domainMin;
+    public Vector3 domainMax;
+
+    // GPU resources
+    ComputeBuffer scalarBuffer;
+    RenderTexture sliceTexture;
+
+    // Renderer reference
+    Renderer rend;
+
+    // Scalar field limits
+    float minValue;
+    float maxValue;
+
+    // Initialization status
+    bool initialized = false;
+
+    // Calculate CFD domain dimensions
+    Vector3 DomainSize()
+    {
+        return domainMax - domainMin;
+    }
+
+    // Calculate CFD domain centre
+    Vector3 DomainCenter()
+    {
+        return (domainMin + domainMax) * 0.5f;
+    }
+
+    // Clamp slice index to valid range
+    void ClampSliceIndex()
+    {
+        switch (sliceAxis)
+        {
+            case SliceAxis.X:
+                sliceIndex = Mathf.Clamp(sliceIndex, 0, gridSize.x - 1);
+                break;
+
+            case SliceAxis.Y:
+                sliceIndex = Mathf.Clamp(sliceIndex, 0, gridSize.y - 1);
+                break;
+
+            case SliceAxis.Z:
+                sliceIndex = Mathf.Clamp(sliceIndex, 0, gridSize.z - 1);
+                break;
+        }
+    }
+
+    // Initialize renderer reference
+    void Awake()
+    {
+        rend = GetComponent<Renderer>();
+    }
+
+    // Initialize GPU resources and upload CFD data
+    public void Initialize()
+    {
+        if (initialized)
+            return;
+
+        CreateRenderTexture();
+        UploadScalarFieldOnce();
+
+        initialized = true;
+    }
+
+    // Update contour slice visualization
+    public void UpdateSlice()
+    {
+        if (!initialized)
+        {
+            Debug.LogError("GPUSliceRenderer not initialized");
+            return;
+        }
+
+        DispatchShader();
+        ApplyTexture();
+        PositionPlane();
+    }
+
+    // Create GPU render texture
+    void CreateRenderTexture()
+    {
+        int width = 1;
+        int height = 1;
+
+        switch (sliceAxis)
+        {
+            case SliceAxis.X:
+                width = gridSize.z;
+                height = gridSize.y;
+                break;
+
+            case SliceAxis.Y:
+                width = gridSize.x;
+                height = gridSize.z;
+                break;
+
+            case SliceAxis.Z:
+                width = gridSize.x;
+                height = gridSize.y;
+                break;
+        }
+
+        if (sliceTexture != null)
+        {
+            sliceTexture.Release();
+        }
+
+        sliceTexture = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32);
+        sliceTexture.enableRandomWrite = true;
+        sliceTexture.Create();
+    }
+
+    // Upload scalar field to GPU memory
+    void UploadScalarFieldOnce()
+    {
+        int total = gridSize.x * gridSize.y * gridSize.z;
+        float[] flat = new float[total];
+        int idx = 0;
+        minValue = float.MaxValue;
+        maxValue = float.MinValue;
+
+        for (int z = 0; z < gridSize.z; z++)
+        {
+            for (int y = 0; y < gridSize.y; y++)
+            {
+                for (int x = 0; x < gridSize.x; x++)
+                {
+                    float v = scalarField[x, y, z];
+
+                    flat[idx++] = v;
+
+                    if (v < minValue) minValue = v;
+
+                    if (v > maxValue) maxValue = v;
+                }
+            }
+        }
+
+        if (scalarBuffer != null)
+        {
+            scalarBuffer.Release();
+        }
+
+        scalarBuffer = new ComputeBuffer(total, sizeof(float));
+        scalarBuffer.SetData(flat);
+    }
+
+    // Execute compute shader kernel
+    void DispatchShader()
+    {
+        ClampSliceIndex();
+
+        int kernel = sliceShader.FindKernel("CSMain");
+
+        sliceShader.SetBuffer(kernel, "scalarField", scalarBuffer);
+        sliceShader.SetTexture(kernel, "Result", sliceTexture);
+        sliceShader.SetInts("gridSize", gridSize.x, gridSize.y, gridSize.z);
+        sliceShader.SetFloat("minValue", minValue);
+        sliceShader.SetFloat("maxValue", maxValue);
+        sliceShader.SetInt("sliceAxis", (int)sliceAxis);
+        sliceShader.SetInt("sliceIndex", sliceIndex);
+
+        int groupsX = Mathf.CeilToInt(sliceTexture.width / 8.0f);
+        int groupsY = Mathf.CeilToInt(sliceTexture.height / 8.0f);
+
+        sliceShader.Dispatch(kernel, groupsX, groupsY, 1);
+    }
+
+    // Apply render texture to slice plane
+    void ApplyTexture()
+    {
+        if (rend == null)
+        {
+            rend = GetComponent<Renderer>();
+        }
+
+        rend.material.mainTexture = sliceTexture;
+    }
+
+    // Position slice plane within CFD domain
+    void PositionPlane()
+    {
+        Vector3 domainSize = DomainSize();
+        Vector3 center = DomainCenter();
+
+        float dx = domainSize.x / (gridSize.x - 1);
+        float dy = domainSize.y / (gridSize.y - 1);
+        float dz = domainSize.z / (gridSize.z - 1);
+
+        switch (sliceAxis)
+        {
+            // Position X slice
+            case SliceAxis.X:
+                transform.position = new Vector3(domainMin.x + sliceIndex * dx, center.y, center.z);
+                transform.rotation = Quaternion.Euler(0, 90,0);
+                transform.localScale = new Vector3(domainSize.z, domainSize.y, 1);
+                break;
+
+            // Position Y slice
+            case SliceAxis.Y:
+                transform.position = new Vector3(center.x, domainMin.y + sliceIndex * dy, center.z);
+                transform.rotation = Quaternion.Euler(90, 0, 0);
+                transform.localScale = new Vector3(domainSize.x, domainSize.z, 1);
+                break;
+
+            // Position Z slice
+            case SliceAxis.Z:
+                transform.position = new Vector3(center.x, center.y, domainMin.z + sliceIndex * dz);
+                transform.rotation = Quaternion.identity;
+                transform.localScale = new Vector3(domainSize.x, domainSize.y, 1);
+                break;
+        }
+    }
+
+    // Keyboard controls for slice navigation
+    void Update()
+    {
+        if (Input.GetKeyDown(KeyCode.UpArrow))
+        {
+            sliceIndex++;
+            UpdateSlice();
+        }
+
+        if (Input.GetKeyDown(KeyCode.DownArrow))
+        {
+            sliceIndex--;
+            UpdateSlice();
+        }
+    }
+
+    // Release GPU resources
+    void OnDestroy()
+    {
+        if (scalarBuffer != null)
+        {
+            scalarBuffer.Release();
+        }
+
+        if (sliceTexture != null)
+        {
+            sliceTexture.Release();
+        }
+    }
+}
