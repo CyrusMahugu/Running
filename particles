@@ -1,0 +1,305 @@
+using System.Collections.Generic;
+using UnityEngine;
+using static UnityEngine.ParticleSystem;
+
+public class Particleseeedingandpathlines : MonoBehaviour
+{
+    // Grid and boundary specification
+    [Header("Domain & Grid")]
+    public Vector3Int gridSize = new Vector3Int(20, 20, 20);
+    public Vector3 domainMin = new Vector3(-2, 0, -2);
+    public Vector3 domainMax = new Vector3(2, 3, 2);
+
+    // Datafile reading
+    public string fname = "sample_flow.dat";
+    public int nheader_lines = 12;
+    // 3D Array to store the flow direction of each grid point
+    public Vector3[,,] velocities;
+    // Scalarfield for velocity contours
+    public float[,,] scalarField;
+    public GPUSliceRenderer sliceRenderer;
+
+    // Particle seeding controls
+    [Header("Seeds")]
+    public int seedCount = 50;
+    public float sphereScale = 0.10f;
+    public float resampleInterval = 10f;
+
+    // Streamlines controls
+    [Header("Trails")]
+    public float trailTime = 7f;
+    public float trailWidth = 0.04f;
+    public float trailMinVertexDist = 0.02f;
+
+    // Particle movement artificial acceleration or slow down control
+    [Header("Integration")]
+    public float speedScale = 1.0f;
+
+    //Streamlines colour mapping controls Blue to Red for min to max
+    [Header("Speed→Color")]
+    public float speedMin = 0f;
+    public float speedMax = 2f;
+
+    // Velocity Sampling
+    private VelocitySampler sampler;
+    private float _resampleTimer = 0f;
+
+    // Internal data storage to each node position and trail
+    class Seed
+    {
+        public Transform tr;
+        public TrailRenderer trail;
+    }
+    // Array to keep track of all active seeds in the scene
+    private readonly List<Seed> seeds = new List<Seed>();
+
+    //Initialization loop
+    void Awake()
+    // Create the Initial batch of particles
+    {
+        ReadFlow();
+        sampler = new VelocitySampler(
+            velocities,
+            gridSize,
+            domainMin,
+            domainMax);
+        SpawnSeeds(seedCount);
+
+        // Slice rendering connection check
+        // Slice rendering connection check
+        if (sliceRenderer == null)
+        {
+            Debug.LogError(
+                "SliceRenderer is NULL");
+
+            return;
+        }
+
+        // Pass CFD data to GPU slice renderer
+        sliceRenderer.scalarField = scalarField;
+        sliceRenderer.gridSize = gridSize;
+
+        // Pass CFD domain boundaries
+        sliceRenderer.domainMin = domainMin;
+        sliceRenderer.domainMax = domainMax;
+
+        // Initialize GPU resources
+        sliceRenderer.Initialize();
+
+        // Generate initial contour slice
+        sliceRenderer.UpdateSlice();
+    }
+
+    // Particle position and trail colour update loop
+    void Update()
+    {
+        float dt = Time.deltaTime;
+
+        // Velocity sampling and Euler forward integration
+        foreach (var s in seeds)
+        {
+            Vector3 p = s.tr.position;
+            Vector3 v = sampler.Sample(p);
+
+            // Move particle
+            p += dt * speedScale * v;
+
+            // Respawn if particle leaves domain
+            if (p.x < domainMin.x ||
+                p.x > domainMax.x ||
+                p.y < domainMin.y ||
+                p.y > domainMax.y ||
+                p.z < domainMin.z ||
+                p.z > domainMax.z)
+            {
+                p = RandomPointInBox();
+
+                // Remove old trail so it doesn't draw across cube
+                s.trail.Clear();
+            }
+
+            // Apply new position
+            s.tr.position = p;
+
+            // Update colour
+            float spd = v.magnitude;
+            Color head = SpeedToColor(spd);
+            s.trail.colorGradient = HeadGradient(head);
+        }
+        // Check if it is time to delete and restart seed
+        _resampleTimer += Time.deltaTime;
+        if (_resampleTimer >= resampleInterval)
+        {
+            _resampleTimer = 0f;
+            ResampleSeeds();
+        }
+    }
+
+    // Partice velocity data file loading and processing
+    void ReadFlow()
+    {
+        string path = System.IO.Path.Combine(Application.streamingAssetsPath, fname);
+
+        // Debug error messages for file reading issues
+        if (!System.IO.File.Exists(path))
+        {
+            Debug.LogError("Flow file not found: " + path);
+            return;
+        }
+
+        string[] lines = System.IO.File.ReadAllLines(path);
+
+        Debug.Log("Total lines in file = " + lines.Length);
+
+        int expectedRows = gridSize.x * gridSize.y * gridSize.z;
+
+        int availableRows = lines.Length - nheader_lines;
+
+        Debug.Log("Expected rows = " + expectedRows);
+        Debug.Log("Available rows = " + availableRows);
+
+        if (availableRows < expectedRows)
+        {
+            Debug.LogError(
+                "Grid size does not match CFD file.\n" +
+                "Expected " + expectedRows + " data rows but file contains " + availableRows);
+            return;
+        }
+
+        velocities = new Vector3[
+            gridSize.x,
+            gridSize.y,
+            gridSize.z];
+
+        int idx = 0;
+
+        for (int z = 0; z < gridSize.z; z++)
+        {
+            for (int y = 0; y < gridSize.y; y++)
+            {
+                for (int x = 0; x < gridSize.x; x++)
+                {
+                    string currentLine =
+                        lines[nheader_lines + idx];
+
+                    string[] tokens =
+                        currentLine.Split(
+                            (char[])null,
+                            System.StringSplitOptions
+                            .RemoveEmptyEntries);
+
+                    if (tokens.Length < 6)
+                    {
+                        Debug.LogError(
+                            "Invalid CFD row:\n" +
+                            currentLine);
+                        return;
+                    }
+
+                    float u = float.Parse(tokens[3]);
+                    float v = float.Parse(tokens[4]);
+                    float w = float.Parse(tokens[5]);
+
+                    velocities[x, y, z] = new Vector3(u, v, w);
+
+                    idx++;
+                }
+            }
+        }
+
+        Debug.Log("Loaded " + idx + " velocity vectors successfully.");
+
+        // Velocity magmitude saclar field from vectors
+        scalarField = new float[
+            gridSize.x,
+            gridSize.y,
+            gridSize.z];
+
+        for (int z = 0; z < gridSize.z; z++)
+        {
+            for (int y = 0; y < gridSize.y; y++)
+            {
+                for (int x = 0; x < gridSize.x; x++)
+                {
+                    scalarField[x, y, z] = velocities[x, y, z].magnitude;
+                }
+            }
+        }
+    }
+
+    // Reseeding of particles
+    void ResampleSeeds()
+    {
+        for (int i = 0; i < seeds.Count; i++)
+        {
+            if (seeds[i] != null && seeds[i].tr != null)
+                Destroy(seeds[i].tr.gameObject);
+        }
+        seeds.Clear();
+        SpawnSeeds(seedCount);
+    }
+
+    void SpawnSeeds(int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            Vector3 p = RandomPointInBox();
+            var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            go.name = $"Seed_{i}";
+            go.transform.localScale = Vector3.one * sphereScale;
+            go.transform.position = p;
+            Destroy(go.GetComponent<Collider>());
+
+            // Trail rendering and properties specification
+            var tr = go.AddComponent<TrailRenderer>();
+            tr.time = trailTime;
+            tr.minVertexDistance = trailMinVertexDist;
+            tr.startWidth = trailWidth;
+            tr.endWidth = trailWidth;
+            tr.alignment = LineAlignment.View;
+            tr.numCapVertices = 2;
+            tr.numCornerVertices = 2;
+            tr.material = new Material(Shader.Find("Sprites/Default"));
+
+            seeds.Add(new Seed { tr = go.transform, trail = tr });
+        }
+    }
+
+    // Trail colour
+    Color SpeedToColor(float s)
+    {
+        float t = Mathf.InverseLerp(speedMin, speedMax, s);
+        return Color.Lerp(Color.blue, Color.red, Mathf.Clamp01(t));
+    }
+
+    // Trail transparency and fading
+    static Gradient HeadGradient(Color head)
+    {
+        var g = new Gradient();
+        g.SetKeys(
+            new[] { new GradientColorKey(head, 0f), new GradientColorKey(head, 1f) },
+            new[] { new GradientAlphaKey(1f, 0f), new GradientAlphaKey(0f, 1f) }
+        );
+        return g;
+    }
+
+    Vector3 RandomPointInBox()
+    {
+        return new Vector3(
+            Mathf.Lerp(domainMin.x, domainMax.x, Random.value),
+            Mathf.Lerp(domainMin.y, domainMax.y, Random.value),
+            Mathf.Lerp(domainMin.z, domainMax.z, Random.value)
+        );
+    }
+
+    // Conversion of grid index into world position
+    Vector3 GridToWorld(Vector3 g)
+    {
+        Vector3 s = new Vector3(
+            (gridSize.x - 1) > 0 ? g.x / (gridSize.x - 1) : 0f,
+            (gridSize.y - 1) > 0 ? g.y / (gridSize.y - 1) : 0f,
+            (gridSize.z - 1) > 0 ? g.z / (gridSize.z - 1) : 0f
+        );
+        return Vector3.Scale(domainMax - domainMin, s) + domainMin;
+    }
+}
